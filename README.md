@@ -10,7 +10,7 @@
 - Bash
 - `awk`, `sed`, `perl`
 - [`fzf`](https://github.com/junegunn/fzf) for interactive selection
-- `wl-clipboard` (`wl-copy`) for copying the selected command
+- `wl-clipboard` (`wl-copy`) or `xsel` for copying the selected command
 - optionally, `shelly` if the history should also include operations recorded by Shelly
 
 The script needs access to the relevant log files. If access to `/var/log` is restricted, run it with permissions that allow the logs to be read.
@@ -41,7 +41,7 @@ Running the command without arguments opens an interactive view of all operation
 phn
 ```
 
-In interactive mode, select an entry in `fzf`. The preview panel on the right shows package information, and the selected command is copied to the Wayland clipboard.
+In interactive mode, select an entry in `fzf`. The preview panel on the right shows package information. The selected text is copied using `wl-copy` when available, or `xsel` as a fallback. If neither clipboard tool is installed, the selection is not copied.
 
 ### Modes
 
