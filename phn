@@ -1,0 +1,272 @@
+#!/usr/bin/env bash
+
+rp() {
+	local color=${1:-1}
+
+	{
+		awk '
+		/\[PACMAN\] Running '\''pacman/ { print; next }
+		/\[ALPM\] (installed|removed|upgraded) / && !/\[ALPM-SCRIPTLET\]/ { print }
+		' /var/log/pacman.log |
+		sed -E 's/T([0-9]{2}:[0-9]{2}:[0-9]{2})\+[0-9]{4}/ \1/' |
+		sed -E \
+		-e 's/\[PACMAN\] Running/---/' \
+		-e 's/\[ALPM\] upgraded / = /' \
+		-e 's/\[ALPM\] installed / + /' \
+		-e 's/\[ALPM\] removed / - /'
+
+		awk '
+		/Command:/ || /INFO \[STANDARD\]: (Installing|Removing|Upgrading) package:/ { print }
+		' /var/log/shelly.log |
+		perl -MTime::Local -pe '
+			if (/^\[([0-9]+)\]/) {
+				$e = $1;
+				($s,$min,$h,$day,$m,$y) = localtime($e);
+				$y += 1900;
+				$m++;
+				s/^\[[^]]+\]/sprintf("[%04d-%02d-%02d %02d:%02d:%02d]",$y,$m,$day,$h,$min,$s)/e;
+			}
+			elsif (/^\[([^]]+)Z\]/) {
+				($d,$t)=split("T",$1);
+				($y,$m,$day)=split("-",$d);
+				($h,$min,$s)=split(":",$t);
+				$e=timegm($s,$min,$h,$day,$m-1,$y);
+				($s,$min,$h,$day,$m,$y)=localtime($e);
+				$y += 1900;
+				$m++;
+				s/^\[[^]]+\]/sprintf("[%04d-%02d-%02d %02d:%02d:%02d]",$y,$m,$day,$h,$min,$s)/e;
+			}
+		' |
+		sed -E \
+		-e 's/^(.*)INFO \[STANDARD\]: Installing package: (.+)$/\1 + \2/' \
+		-e 's/^(.*)INFO \[STANDARD\]: Removing package: (.+)$/\1 - \2/' \
+		-e 's/^(.*)INFO \[STANDARD\]: Upgrading package: (.+) -> (.+)$/\1 = \2 -> \3/' \
+		-e "s/Command: /--- '/" \
+		-e "/--- '/ s/$/'/" \
+		-e 's/^(\[[^]]+\])[[:space:]]+= ([^ ]+) ([^ ]+) -> ([^ ]+)$/\1 = \2 (\3 -> \4)/' \
+		-e 's/^(\[[^]]+\])[[:space:]]+(\+|-) (.*) ([^ ]+)$/\1 \2 \3 (\4)/' \
+		-e 's/^(\[[^]]+\])[[:space:]]+(\+|-) (.*)-([^ -]+-[^ -]+)$/\1 \2 \3 (\4)/' \
+		-e 's/^(.*) = (.*)-([^ -]+-[^ -]+) -> (.*)-([^ -]+-[^ -]+)$/\1 = \2 (\3 -> \5)/'
+	} |
+	sort -s -k1,2 |
+	awk '{
+		ts=substr($0,1,21)
+		rest=substr($0,23)
+		if(ts==prev) print rest
+		else print $0
+		prev=ts
+	}' |
+	sed -E '/---/! s/^\[[^]]+\] //' |
+	awk '/--- /{if(sep&&has)print sep;sep=$0;has=0;next}{if(sep){print sep;sep=""};print;has=1}END{if(sep&&has)print sep}' |
+	if (( color )); then
+		sed -E \
+		-e 's/(---.*)$/\x1b[37m\1\x1b[0m/' \
+		-e 's/^(\+ .*)$/\x1b[32m\1\x1b[0m/' \
+		-e 's/^(= .*)$/\x1b[33m\1\x1b[0m/' \
+		-e 's/^(- .*)$/\x1b[31m\1\x1b[0m/' \
+		-e 's/( \+ .*)$/\x1b[32m\1\x1b[0m/' \
+		-e 's/( = .*)$/\x1b[33m\1\x1b[0m/' \
+		-e 's/( - .*)$/\x1b[31m\1\x1b[0m/'
+	else
+		cat
+	fi
+}
+
+_rp_blocks() {
+	local mode=$1
+	local color=${2:-1}
+
+	case $mode in
+		c)
+			rp "$color" | sed '/= /d'
+			;;
+		u)
+			rp "$color" | sed -E '/ \+ /d; / - /d'
+			;;
+		a)
+			rp "$color"
+			;;
+		*)
+			return 1
+			;;
+	esac |
+	awk '
+		/--- / {
+			if (block != "" && has)
+				blocks[++n]=block
+
+			block=$0 ORS
+			has=0
+			next
+		}
+
+		{
+			block=block $0 ORS
+
+			if ($0 ~ /\+ / || $0 ~ /= / || $0 ~ /- /)
+				has=1
+		}
+
+		END {
+			if (block != "" && has)
+				blocks[++n]=block
+
+			for (i=n; i>=1; i--)
+				printf "%s", blocks[i]
+		}
+	' | sed 's/--- //' 
+}
+
+_rp_fzf() {
+	local mode=$1
+	local number=$2
+	local color=${3:-1}
+
+	local output
+
+	output=$(_rp_blocks "$mode" "$color") || return 1
+
+	if [[ $number == 1 ]]; then
+		output=$(printf '%s' "$output" | awk '{print NR " " $0}')
+	fi
+
+	local selected
+	selected=$(printf '%s\n' "$output" |
+	fzf --exact --ansi -e --no-sort --height=100% \
+		--preview 'cmd=$(echo {} | sed "s/^[[:space:]]*[0-9]*[[:space:]]*//;s/^\[[^]]*\][[:space:]]*//;s/^'\''//;s/'\''$//"); p=$(echo "$cmd" | awk "\$1 == \"+\" || \$1 == \"=\" || \$1 == \"-\" {print \$2; exit}"); if [[ -n "$p" ]]; then out=$(pacman -Sii "$p" 2>/dev/null) && printf "%s\n" "$out" || printf "%s\n" "$cmd"; else printf "%s\n" "$cmd"; fi' \
+		--preview-window=right:65%) || return
+
+	local clean
+	clean=$(printf '%s\n' "$selected" |
+		sed -E $'s/\\x1b\\[[0-9;]*m//g; s/^[[:space:]]*[0-9]+[[:space:]]+//; s/^\\[[^]]+\\][[:space:]]*//; s/^[[:space:]]+//')
+
+	if [[ $clean =~ ^[+=-][[:space:]]+ ]]; then
+		printf '%s\n' "$clean" | awk '{print $2}' | wl-copy
+	else
+		printf '%s\n' "$clean" | sed -E "s/^'//; s/'$//" | wl-copy
+	fi
+}
+
+phn() {
+	local mode=a
+	local dump=0
+	local number=0
+	local color=1
+
+	for arg in "$@"; do
+		case $arg in
+			c|change)
+				mode=c
+				;;
+			u|update)
+				mode=u
+				;;
+			d|dump)
+				dump=1
+				;;
+			n|number)
+				number=1
+				;;
+			m|monochrome)
+				color=0
+				;;
+			-h|--help)
+				cat <<'EOF'
+Usage:
+
+  phn [MODE] [MODIFIERS]
+
+Modes:
+  c | change          changes (+ / -)
+  u | update          updates (=)
+  d | dump            dump (raw output)
+  <empty>             all (interactive)
+
+Modifiers:
+  n | number          add line numbers
+  m | monochrome      monochrome output
+
+Examples:
+  phn
+  phn c
+  phn u
+  phn d
+  phn n
+  phn cn              changes + numbers
+  phn un              updates + numbers
+  phn du              dump + updates
+  phn dn              dump + numbers
+  phn unm             updates + numbers + monochrome
+
+Options:
+  -h, --help          show this help
+  -v, --version       show version
+EOF
+				return 0
+				;;
+			--version|-v)
+				printf '%s\n' 'phn 1.0'
+				return 0
+				;;
+			*)
+				if [[ $arg =~ ^[cudnm]+$ ]]; then
+					for ((i=0; i<${#arg}; i++)); do
+						case ${arg:i:1} in
+							c)
+								mode=c
+								;;
+							u)
+								mode=u
+								;;
+							d)
+								dump=1
+								;;
+							n)
+								number=1
+								;;
+							m)
+								color=0
+								;;
+							*)
+								printf 'phn: unknown argument: %s\n' "$arg" >&2
+								phn --help
+								return 2
+								;;
+							esac
+					done
+					continue
+				fi
+
+				printf 'phn: unknown argument: %s\n' "$arg" >&2
+				phn --help
+				return 2
+				;;
+		esac
+	done
+
+	if (( dump )); then
+		case $mode in
+			c)
+				output=$(rp "$color" | sed '/= /d')
+				;;
+			u)
+				output=$(rp "$color" | sed -E '/ \+ /d; / - /d')
+				;;
+			a)
+				output=$(rp "$color")
+				;;
+		esac
+
+		if (( number )); then
+			printf '%s\n' "$output" | awk '{print NR " " $0}' | sed 's/--- //'
+		else
+			printf '%s\n' "$output" | sed 's/--- //'
+		fi
+		return
+	fi
+
+	_rp_fzf "$mode" "$number" "$color"
+}
+
+phn "$@"
+
