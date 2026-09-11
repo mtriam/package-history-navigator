@@ -123,6 +123,13 @@ _rp_fzf() {
 	local color=${3:-1}
 
 	local output
+	local display_file
+	local search_file
+	local search_mode_file
+	local first_match_bind
+	local next_match_bind
+	local prev_match_bind
+	local toggle_filter_bind
 
 	output=$(_rp_blocks "$mode" "$color") || return 1
 
@@ -130,11 +137,136 @@ _rp_fzf() {
 		output=$(printf '%s' "$output" | awk '{print NR " " $0}')
 	fi
 
+	# Keep a separate ANSI-free copy of the list.
+	# fzf receives the colored output, while transforms search
+	# the matching plain-text lines from the same content.
+	display_file=$(mktemp) || return 1
+	search_file=$(mktemp) || return 1
+	search_mode_file=$(mktemp) || return 1
+
+	printf '%s\n' "$output" > "$display_file"
+
+	printf '%s\n' "$output" |
+		sed -E $'s/\\x1b\\[[0-9;]*m//g' > "$search_file"
+
+	printf '%s\n' 'jump' > "$search_mode_file"
+
+	export PHN_DISPLAY_FILE="$display_file"
+	export PHN_SEARCH_FILE="$search_file"
+	export PHN_SEARCH_MODE_FILE="$search_mode_file"
+
+	first_match_bind='change:transform:
+		mode=$(cat "$PHN_SEARCH_MODE_FILE" 2>/dev/null || printf jump)
+
+		if [[ "$mode" == "filter" ]]; then
+			exit
+		fi
+
+		if [[ -z "$FZF_QUERY" ]]; then
+			exit
+		fi
+
+		n=$(grep -niF -- "$FZF_QUERY" "$PHN_SEARCH_FILE" |
+			head -n1 |
+			cut -d: -f1)
+
+		if [[ -n "$n" ]]; then
+			printf "pos(%s)\n" "$n"
+		fi
+	'
+
+	next_match_bind='ctrl-n:transform:
+		mode=$(cat "$PHN_SEARCH_MODE_FILE" 2>/dev/null || printf jump)
+
+		if [[ "$mode" == "filter" ]]; then
+			printf "down\n"
+			exit
+		fi
+
+		if [[ -z "$FZF_QUERY" ]]; then
+			printf "down\n"
+			exit
+		fi
+
+		n=$(grep -niF -- "$FZF_QUERY" "$PHN_SEARCH_FILE" |
+			cut -d: -f1 |
+			awk -v pos="$FZF_POS" "
+				NR == 1 { first = \$1 }
+				\$1 > pos { print; found = 1; exit }
+				{ last = \$1 }
+				END {
+					if (!found && first != \"\")
+						print first
+				}
+			" |
+			head -n1)
+
+		if [[ -n "$n" ]]; then
+			printf "pos(%s)\n" "$n"
+		fi
+	'
+
+	prev_match_bind='ctrl-p:transform:
+		mode=$(cat "$PHN_SEARCH_MODE_FILE" 2>/dev/null || printf jump)
+
+		if [[ "$mode" == "filter" ]]; then
+			printf "up\n"
+			exit
+		fi
+
+		if [[ -z "$FZF_QUERY" ]]; then
+			printf "up\n"
+			exit
+		fi
+
+		n=$(grep -niF -- "$FZF_QUERY" "$PHN_SEARCH_FILE" |
+			cut -d: -f1 |
+			awk -v pos="$FZF_POS" "
+				\$1 < pos { prev = \$1 }
+				{ last = \$1 }
+				END {
+					if (prev != \"\")
+						print prev
+					else if (last != \"\")
+						print last
+				}
+			" |
+			head -n1)
+
+		if [[ -n "$n" ]]; then
+			printf "pos(%s)\n" "$n"
+		fi
+	'
+
+	toggle_filter_bind='ctrl-r:transform:
+		mode=$(cat "$PHN_SEARCH_MODE_FILE" 2>/dev/null || printf jump)
+
+		if [[ "$mode" == "filter" ]]; then
+			printf "%s\n" jump > "$PHN_SEARCH_MODE_FILE"
+				printf "disable-search+reload-sync(cat \"$PHN_DISPLAY_FILE\")+change-ghost([C-n next · C-p prev · C-r restrict:OFF])+first\n"
+			else
+				printf "%s\n" filter > "$PHN_SEARCH_MODE_FILE"
+				printf "reload-sync(cat \"$PHN_DISPLAY_FILE\")+enable-search+change-ghost([C-n next · C-p prev · C-r restrict:ON])+wait+first\n"
+			fi
+		'
+
+	trap 'rm -f "$PHN_DISPLAY_FILE" "$PHN_SEARCH_FILE" "$PHN_SEARCH_MODE_FILE"; unset PHN_DISPLAY_FILE PHN_SEARCH_FILE PHN_SEARCH_MODE_FILE' RETURN
+
 	local selected
+
 	selected=$(printf '%s\n' "$output" |
-	fzf --exact --ansi -e --no-sort --height=100% \
-		--preview 'cmd=$(echo {} | sed "s/^[[:space:]]*[0-9]*[[:space:]]*//;s/^\[[^]]*\][[:space:]]*//;s/^'\''//;s/'\''$//"); p=$(echo "$cmd" | awk "\$1 == \"+\" || \$1 == \"=\" || \$1 == \"-\" {print \$2; exit}"); if [[ -n "$p" ]]; then out=$(pacman -Sii "$p" 2>/dev/null) && printf "%s\n" "$out" || printf "%s\n" "$cmd"; else printf "%s\n" "$cmd"; fi' \
-		--preview-window=right:65%) || return
+			fzf --exact --ansi -e --no-sort --height=100% \
+				--disabled \
+				--scroll-off=3 \
+				--prompt '> ' \
+				--ghost '[Ctrl-n next · C-p prev · C-r restrict:OFF]' \
+				--info hidden \
+			--bind "$first_match_bind" \
+			--bind "$next_match_bind" \
+			--bind "$prev_match_bind" \
+			--bind "$toggle_filter_bind" \
+			--preview 'cmd=$(echo {} | sed "s/^[[:space:]]*[0-9]*[[:space:]]*//;s/^\[[^]]*\][[:space:]]*//;s/^'\''//;s/'\''$//"); p=$(echo "$cmd" | awk "\$1 == \"+\" || \$1 == \"=\" || \$1 == \"-\" {print \$2; exit}"); if [[ -n "$p" ]]; then out=$(pacman -Sii "$p" 2>/dev/null) && printf "%s\n" "$out" || printf "%s\n" "$cmd"; else printf "%s\n" "$cmd"; fi' \
+			--preview-window=right:65%) || return
 
 	local clean
 	clean=$(printf '%s\n' "$selected" |
@@ -239,7 +371,7 @@ EOF
 								phn --help
 								return 2
 								;;
-							esac
+						esac
 					done
 					continue
 				fi
@@ -276,4 +408,3 @@ EOF
 }
 
 phn "$@"
-

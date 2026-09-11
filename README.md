@@ -43,6 +43,8 @@ phn
 
 In interactive mode, select an entry in `fzf`. The preview panel on the right shows package information. The selected text is copied using `wl-copy` when available, or `xsel` as a fallback. If neither clipboard tool is installed, the selection is not copied.
 
+While searching, `Ctrl+R` toggles restricting the list to matches, `Ctrl+N` jumps to the next match, and `Ctrl+P` jumps to the previous one.
+
 ### Modes
 
 | Command | Description |
