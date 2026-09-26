@@ -5,7 +5,7 @@ rp() {
 
 	{
 		awk '
-		/\[PACMAN\] Running '\''pacman/ { print; next }
+		/\[PACMAN\] Running .*pacman/ { print; next }
 		/\[ALPM\] (installed|removed|upgraded) / && !/\[ALPM-SCRIPTLET\]/ { print }
 		' /var/log/pacman.log |
 		sed -E 's/T([0-9]{2}:[0-9]{2}:[0-9]{2})\+[0-9]{4}/ \1/' |
